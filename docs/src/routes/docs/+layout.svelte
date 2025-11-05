@@ -12,6 +12,8 @@
 	$: currentPath = $page.url.pathname;
 </script>
 
+<svelte:options tag="div" />
+
 <div class="container mx-auto max-w-6xl px-8 py-12">
 	<header class="mb-12 text-center border-b border-gray-200 pb-8">
 		<h1 class="text-5xl font-bold mb-3 text-text-primary">BP Mobile Documentation</h1>

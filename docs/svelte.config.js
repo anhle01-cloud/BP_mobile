@@ -6,11 +6,15 @@ import { mdsvex } from 'mdsvex';
 const config = {
 	extensions: ['.svelte', '.md', '.svx'],
 	preprocess: [
-		vitePreprocess(),
 		mdsvex({
 			remarkPlugins: [],
 			rehypePlugins: [],
-			layout: false
+			layout: false,
+			smartypants: false
+		}),
+		vitePreprocess({
+			// Disable Svelte script parsing for markdown files
+			script: false
 		})
 	],
 
