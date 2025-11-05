@@ -23,6 +23,7 @@ class RecordingState {
   final int? sessionId; // Current session ID
   final Map<String, List<DataEntry>> latestEntries;
   final Map<String, bool> publisherStatus;
+  final Map<String, String> unavailableTopics; // Topics configured but unavailable
   final int totalEntries; // Global total
   final int storageSizeBytes; // Global storage
   final int sessionEntries; // Session-specific entry count
@@ -35,12 +36,14 @@ class RecordingState {
     this.sessionId,
     Map<String, List<DataEntry>>? latestEntries,
     Map<String, bool>? publisherStatus,
+    Map<String, String>? unavailableTopics,
     this.totalEntries = 0,
     this.storageSizeBytes = 0,
     this.sessionEntries = 0,
     this.sessionStorageBytes = 0,
   })  : latestEntries = latestEntries ?? {},
-        publisherStatus = publisherStatus ?? {};
+        publisherStatus = publisherStatus ?? {},
+        unavailableTopics = unavailableTopics ?? {};
 
   RecordingState copyWith({
     bool? isRecording,
@@ -49,6 +52,7 @@ class RecordingState {
     int? sessionId,
     Map<String, List<DataEntry>>? latestEntries,
     Map<String, bool>? publisherStatus,
+    Map<String, String>? unavailableTopics,
     int? totalEntries,
     int? storageSizeBytes,
     int? sessionEntries,
@@ -61,6 +65,7 @@ class RecordingState {
       sessionId: sessionId ?? this.sessionId,
       latestEntries: latestEntries ?? this.latestEntries,
       publisherStatus: publisherStatus ?? this.publisherStatus,
+      unavailableTopics: unavailableTopics ?? this.unavailableTopics,
       totalEntries: totalEntries ?? this.totalEntries,
       storageSizeBytes: storageSizeBytes ?? this.storageSizeBytes,
       sessionEntries: sessionEntries ?? this.sessionEntries,
@@ -91,10 +96,19 @@ class RecordingStateNotifier extends Notifier<RecordingState> {
     // Listen to latest entries stream
     _latestEntriesSubscription = service.latestEntriesStream.listen(
       (latestEntries) {
-        state = state.copyWith(
-          latestEntries: latestEntries,
-          publisherStatus: service.getPublisherStatus(),
-        );
+        try {
+          state = state.copyWith(
+            latestEntries: latestEntries,
+            publisherStatus: service.getPublisherStatus(),
+            unavailableTopics: service.getUnavailableTopics(),
+          );
+        } catch (e) {
+          // Handle case where service might be disposed
+          print('Error updating state from stream: $e');
+        }
+      },
+      onError: (error) {
+        print('Error in latest entries stream: $error');
       },
     );
     
@@ -163,6 +177,7 @@ class RecordingStateNotifier extends Notifier<RecordingState> {
       sessionNumber: service.sessionNumber,
       sessionId: service.getCurrentSessionId(),
       publisherStatus: service.getPublisherStatus(),
+      unavailableTopics: service.getUnavailableTopics(),
       totalEntries: totalEntries,
       storageSizeBytes: storageSize,
       sessionEntries: 0,
@@ -192,6 +207,16 @@ class RecordingStateNotifier extends Notifier<RecordingState> {
   /// Get publisher status
   Map<String, bool> getPublisherStatus() {
     return service.getPublisherStatus();
+  }
+
+  /// Get unavailable topics
+  Map<String, String> getUnavailableTopics() {
+    try {
+      return service.getUnavailableTopics();
+    } catch (e) {
+      print('Error getting unavailable topics: $e');
+      return <String, String>{};
+    }
   }
 }
 

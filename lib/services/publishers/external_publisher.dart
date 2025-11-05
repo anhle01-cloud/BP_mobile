@@ -39,8 +39,11 @@ class ExternalPublisher implements Publisher {
     _activeController.add(true);
 
     // Subscribe to server data stream
+    // Note: Data comes in format: {id, timestamp, client_name, topic_name, data}
+    // topic_name is already in format: client_name/topic_tree
     _subscription = server.dataStream.listen(
       (data) {
+        // Forward data as-is (already formatted correctly)
         _dataController.add(data);
       },
       onError: (error) {

@@ -5,6 +5,8 @@ import 'publishers/imu_publisher.dart';
 import 'publishers/external_publisher.dart';
 import 'websocket_server.dart';
 import 'network_manager.dart';
+import 'network_settings_service.dart';
+import 'topic_subscription_service.dart';
 
 /// Publisher Manager manages all publishers independently of recording state
 /// Publishers emit data continuously when enabled, allowing multiple consumers
@@ -64,11 +66,40 @@ class PublisherManager {
   /// Get External publisher (creates if needed)
   ExternalPublisher? get externalPublisher => _externalPublisher;
 
+  /// Get WebSocket server instance (may be null if not initialized)
+  WebSocketServer? get webSocketServer => _webSocketServer;
+
   /// Get WebSocket server (creates if needed)
   Future<WebSocketServer?> getWebSocketServer() async {
     if (_webSocketServer == null) {
-      _webSocketServer = WebSocketServer();
+      // Load port from settings
+      final networkSettings = NetworkSettingsService();
+      final port = await networkSettings.getPort();
+      
+      _webSocketServer = WebSocketServer(port: port);
       _externalPublisher = ExternalPublisher(server: _webSocketServer!);
+      
+      // Load topic subscriptions
+      final subscriptionService = TopicSubscriptionService();
+      final subscriptions = await subscriptionService.getSubscribedTopics();
+      _webSocketServer!.subscribeTopics(subscriptions.toList());
+      
+      // Listen to client connections/disconnections and topic discoveries
+      _webSocketServer!.clientConnectedStream.listen((client) {
+        // Emit topics when client connects
+        _updateAvailableTopics();
+      });
+      
+      _webSocketServer!.clientDisconnectedStream.listen((clientName) {
+        // Emit topics when client disconnects
+        _updateAvailableTopics();
+      });
+      
+      _webSocketServer!.topicDiscoveredStream.listen((topicInfo) {
+        // Emit topics when new topic is discovered
+        _updateAvailableTopics();
+      });
+      
       await _webSocketServer!.start();
       
       // Listen to external publisher active state
@@ -78,13 +109,19 @@ class PublisherManager {
     }
     return _webSocketServer;
   }
+  
+  /// Update available topics from network clients
+  void _updateAvailableTopics() {
+    // This will trigger a refresh of available topics
+    // The getAvailableTopics() method will be called to refresh
+  }
 
   /// Get sampling rate for a publisher
   double getSamplingRate(String publisherName) {
     return _samplingRates[publisherName] ?? 1.0;
   }
 
-  /// Set sampling rate for a publisher (GPS or IMU only)
+  /// Set sampling rate for a publisher (GPS or IMU)
   void setSamplingRate(String publisherName, double rate) {
     if (publisherName == 'gps' || publisherName == 'imu') {
       _samplingRates[publisherName] = rate;
@@ -103,6 +140,7 @@ class PublisherManager {
   List<String> getAvailableTopics() {
     final topics = <String>[];
     
+    // Internal topics
     if (_enabledState['gps'] == true) {
       topics.add('gps/location');
     }
@@ -114,13 +152,75 @@ class PublisherManager {
       topics.add('imu/user_acceleration');
     }
     
-    if (_enabledState['external'] == true) {
-      // External topics are dynamic - they come from ESP32
-      // We'll add them as they're discovered, but for now just show the base topic
-      topics.add('external/data');
+    // Network topics from ESP32 clients
+    if (_enabledState['external'] == true && _webSocketServer != null) {
+      final clients = _webSocketServer!.connectedClients;
+      for (var client in clients) {
+        for (var topic in client.topics) {
+          // Format: client_name/topic_tree
+          final fullTopicName = '${client.name}/$topic';
+          topics.add(fullTopicName);
+        }
+      }
     }
     
     return topics;
+  }
+  
+  /// Get network topics with metadata
+  Map<String, Map<String, dynamic>> getNetworkTopics() {
+    final topics = <String, Map<String, dynamic>>{};
+    
+    if (_webSocketServer != null) {
+      final clients = _webSocketServer!.connectedClients;
+      for (var client in clients) {
+        for (var topic in client.topics) {
+          final fullTopicName = '${client.name}/$topic';
+          final metadata = client.topicMetadata[topic];
+          
+          topics[fullTopicName] = {
+            'client_name': client.name,
+            'topic': topic,
+            'client': client,
+            'metadata': metadata,
+            'connection_quality': client.connectionQuality,
+            'is_connected': client.isConnected,
+          };
+        }
+      }
+    }
+    
+    return topics;
+  }
+  
+  /// Get topic metadata for a network topic
+  Map<String, dynamic>? getTopicMetadata(String topicName) {
+    // Check if it's a network topic (format: client_name/topic)
+    if (!topicName.contains('/')) return null;
+    
+    final parts = topicName.split('/');
+    if (parts.length < 2) return null;
+    
+    final clientName = parts[0];
+    final topic = parts.sublist(1).join('/');
+    
+    if (_webSocketServer != null) {
+      final client = _webSocketServer!.getClient(clientName);
+      if (client != null) {
+        final metadata = client.topicMetadata[topic];
+        if (metadata != null) {
+          return {
+            'description': metadata.description,
+            'unit': metadata.unit,
+            'sampling_rate': metadata.samplingRate,
+            'connection_quality': client.connectionQuality,
+            'client_name': clientName,
+          };
+        }
+      }
+    }
+    
+    return null;
   }
 
   /// Get WebSocket server info (IP and port)
@@ -202,6 +302,7 @@ class PublisherManager {
       // If start fails, revert enabled state
       _enabledState[publisherName] = false;
       _enabledControllers[publisherName]?.add(false);
+      // Re-throw to allow UI to handle the error
       rethrow;
     }
   }
@@ -238,14 +339,17 @@ class PublisherManager {
 
   /// Check if a publisher is active (running and emitting data)
   bool isPublisherActive(String publisherName) {
+    // Safely check enabled state - return false if not found
+    final isEnabled = _enabledState[publisherName] ?? false;
+    if (!isEnabled) return false;
+    
     switch (publisherName) {
       case 'gps':
-        return _enabledState['gps']! && _gpsPublisher.isCurrentlyActive;
+        return _gpsPublisher.isCurrentlyActive;
       case 'imu':
-        return _enabledState['imu']! && _imuPublisher.isCurrentlyActive;
+        return _imuPublisher.isCurrentlyActive;
       case 'external':
-        return _enabledState['external']! && 
-               (_externalPublisher?.isCurrentlyActive ?? false);
+        return _externalPublisher?.isCurrentlyActive ?? false;
       default:
         return false;
     }
@@ -291,6 +395,53 @@ class PublisherManager {
     await _webSocketServer?.stop();
     _webSocketServer = null;
     _externalPublisher = null;
+  }
+
+  /// Restart WebSocket server with new port
+  Future<void> restartWebSocketServer({int? newPort}) async {
+    final wasEnabled = _enabledState['external'] == true;
+    
+    // Stop server if running
+    if (_webSocketServer != null) {
+      await stopWebSocketServer();
+      _externalPublisher = null;
+    }
+    
+    // Set new port if provided
+    if (newPort != null) {
+      final networkSettings = NetworkSettingsService();
+      await networkSettings.setPort(newPort);
+    }
+    
+    // Recreate server with new port
+    final networkSettings = NetworkSettingsService();
+    final port = await networkSettings.getPort();
+    _webSocketServer = WebSocketServer(port: port);
+    _externalPublisher = ExternalPublisher(server: _webSocketServer!);
+    
+    // Reload topic subscriptions
+    final subscriptionService = TopicSubscriptionService();
+    final subscriptions = await subscriptionService.getSubscribedTopics();
+    _webSocketServer!.subscribeTopics(subscriptions.toList());
+    
+    // Set up listeners
+    _webSocketServer!.clientConnectedStream.listen((client) {
+      _updateAvailableTopics();
+    });
+    
+    _webSocketServer!.clientDisconnectedStream.listen((clientName) {
+      _updateAvailableTopics();
+    });
+    
+    _webSocketServer!.topicDiscoveredStream.listen((topicInfo) {
+      _updateAvailableTopics();
+    });
+    
+    // Restart if it was enabled
+    if (wasEnabled) {
+      await _webSocketServer!.start();
+      await _externalPublisher?.start();
+    }
   }
 
   /// Dispose all resources

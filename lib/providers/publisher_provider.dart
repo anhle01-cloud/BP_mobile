@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/publisher_manager.dart';
+import '../models/network_client.dart';
+import '../models/topic_history.dart';
 
 /// Publisher manager provider (kept alive to maintain state across screens)
 final publisherManagerProvider = Provider<PublisherManager>((ref) {
@@ -128,6 +130,141 @@ final availableTopicsProvider = StreamProvider<List<String>>((ref) {
     } catch (e) {
       print('Error closing controller: $e');
     }
+  });
+  
+  return controller.stream;
+});
+
+/// Connected network clients provider
+/// Streams connected ESP32 clients with their connection quality
+final connectedClientsProvider = StreamProvider<List<NetworkClient>>((ref) {
+  final manager = ref.watch(publisherManagerProvider);
+  
+  final controller = StreamController<List<NetworkClient>>();
+  Timer? timer;
+  StreamSubscription<NetworkClient>? connectedSub;
+  StreamSubscription<String>? disconnectedSub;
+  
+  void emitClients() {
+    try {
+      final webSocketServer = manager.webSocketServer;
+      if (webSocketServer != null && webSocketServer.isRunning) {
+        final clients = webSocketServer.connectedClients;
+        controller.add(clients);
+      } else {
+        controller.add([]);
+      }
+    } catch (e) {
+      print('Error getting connected clients: $e');
+      controller.add([]);
+    }
+  }
+  
+  // Listen to client connection/disconnection streams
+  Future<void> setupStreams() async {
+    final webSocketServer = await manager.getWebSocketServer();
+    if (webSocketServer != null) {
+      connectedSub = webSocketServer.clientConnectedStream.listen(
+        (_) => emitClients(),
+      );
+      disconnectedSub = webSocketServer.clientDisconnectedStream.listen(
+        (_) => emitClients(),
+      );
+    }
+  }
+  
+  // Initial setup
+  setupStreams();
+  
+  // Poll every 2 seconds to catch connection quality updates
+  timer = Timer.periodic(const Duration(seconds: 2), (_) => emitClients());
+  
+  // Initial emit
+  emitClients();
+  
+  ref.onDispose(() {
+    timer?.cancel();
+    connectedSub?.cancel();
+    disconnectedSub?.cancel();
+    controller.close();
+  });
+  
+  return controller.stream;
+});
+
+/// Network topics with metadata provider
+final networkTopicsProvider = StreamProvider<Map<String, Map<String, dynamic>>>((ref) {
+  final manager = ref.watch(publisherManagerProvider);
+  final clientsAsync = ref.watch(connectedClientsProvider);
+  
+  final controller = StreamController<Map<String, Map<String, dynamic>>>();
+  Timer? timer;
+  
+  void emitTopics() {
+    try {
+      final topics = manager.getNetworkTopics();
+      controller.add(topics);
+    } catch (e) {
+      print('Error getting network topics: $e');
+      controller.add({});
+    }
+  }
+  
+  // Listen to client changes
+  clientsAsync.whenData((_) => emitTopics());
+  
+  // Initial emit
+  emitTopics();
+  
+  // Poll every 2 seconds
+  timer = Timer.periodic(const Duration(seconds: 2), (_) => emitTopics());
+  
+  ref.onDispose(() {
+    timer?.cancel();
+    controller.close();
+  });
+  
+  return controller.stream;
+});
+
+/// Topic history provider (from WebSocket server)
+final topicHistoryProvider = StreamProvider<Map<String, List<TopicHistoryEntry>>>((ref) {
+  final manager = ref.watch(publisherManagerProvider);
+  
+  final controller = StreamController<Map<String, List<TopicHistoryEntry>>>();
+  Timer? timer;
+  
+  void emitHistory() {
+    try {
+      final webSocketServer = manager.webSocketServer;
+      if (webSocketServer != null && webSocketServer.isRunning) {
+        final historyCache = webSocketServer.topicHistory;
+        final topics = historyCache.getTopics();
+        final history = <String, List<TopicHistoryEntry>>{};
+        
+        for (var topic in topics) {
+          history[topic] = historyCache.getEntries(topic);
+        }
+        
+        controller.add(history);
+      } else {
+        controller.add({});
+      }
+    } catch (e) {
+      print('Error getting topic history: $e');
+      controller.add({});
+    }
+  }
+  
+  // Poll every 1 second for topic history updates
+  timer = Timer.periodic(const Duration(seconds: 1), (_) => emitHistory());
+  
+  // Initial emit
+  emitHistory();
+  
+  ref.onDispose(() {
+    timer?.cancel();
+    controller.close();
   });
   
   return controller.stream;

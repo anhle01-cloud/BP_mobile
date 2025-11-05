@@ -93,75 +93,78 @@ class _ExperimentDetailScreenState
           // Get available topics from enabled publishers
           final publisherManager = ref.watch(publisherManagerProvider);
           final availableTopicsAsync = ref.watch(availableTopicsProvider);
-          
-          // Map of topic names to enabled state (from experiment topics)
-          final Map<String, bool> topicEnabledMap = {};
-          topicsAsync.whenData((topics) {
-            for (var topic in topics) {
-topicEnabledMap[topic.name] = topic.enabled;
-            }
-          });
 
-          return availableTopicsAsync.when(
-            data: (availableTopics) => Column(
-              children: [
-                // Experiment name
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: _isEditing
-                      ? TextField(
-                          controller: _nameController,
-                          decoration: const InputDecoration(
-                            labelText: 'Experiment Name',
-                            border: OutlineInputBorder(),
-                          ),
-                        )
-                      : Text(
-                          experiment.name,
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                ),
-                const Divider(),
+          return topicsAsync.when(
+            data: (topics) {
+              // Map of topic names to enabled state (from experiment topics)
+              final Map<String, bool> topicEnabledMap = {};
+              for (var topic in topics) {
+                topicEnabledMap[topic.name] = topic.enabled;
+              }
 
-                // Available Topics section (from enabled publishers)
-                Expanded(
-                  child: availableTopics.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(
-                              Icons.sensors_off,
-                              size: 64,
-                              color: AppColors.textTertiary,
-                            ),
-                            const SizedBox(height: 16),
-                            const Text(
-                              'No publishers enabled',
-                              style: TextStyle(
-                                fontSize: 18,
-                                color: AppColors.textSecondary,
+              return availableTopicsAsync.when(
+                data: (availableTopics) => Column(
+                  children: [
+                    // Experiment name
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: _isEditing
+                          ? TextField(
+                              controller: _nameController,
+                              decoration: const InputDecoration(
+                                labelText: 'Experiment Name',
+                                border: OutlineInputBorder(),
                               ),
+                            )
+                          : Text(
+                              experiment.name,
+                              style: Theme.of(context).textTheme.headlineSmall,
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Enable publishers in the Publishers view to see available topics',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: AppColors.textTertiary,
-                              ),
-                              textAlign: TextAlign.center,
+                    ),
+                    const Divider(),
+
+                    // Available Topics section (from enabled publishers)
+                    Expanded(
+                      child: availableTopics.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(
+                                  Icons.sensors_off,
+                                  size: 64,
+                                  color: AppColors.textTertiary,
+                                ),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'No publishers enabled',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    color: AppColors.textSecondary,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Enable publishers in the Publishers view to see available topics',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: AppColors.textTertiary,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        itemCount: availableTopics.length,
-                        itemBuilder: (context, index) {
-                          final topicName = availableTopics[index];
-                          final isTopicEnabled = topicEnabledMap[topicName] ?? false;
-                          final isTopicActive = isRecording && 
-                              (recordingState.publisherStatus[topicName] == true);
+                          )
+                        : ListView.builder(
+                            itemCount: availableTopics.length,
+                            itemBuilder: (context, index) {
+                              final topicName = availableTopics[index];
+                              final isTopicEnabled = topicEnabledMap[topicName] ?? false;
+                              final isTopicActive = isRecording && 
+                                  (recordingState.publisherStatus[topicName] == true);
+                              final isTopicUnavailable = isRecording && 
+                                  recordingState.unavailableTopics.containsKey(topicName);
+                              final unavailableReason = recordingState.unavailableTopics[topicName];
                           
                           // Get sampling rate from publisher manager for internal topics
                           String samplingRateText;
@@ -217,48 +220,100 @@ topicEnabledMap[topic.name] = topic.enabled;
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text('Sampling Rate: $samplingRateText'),
-                                  if (isRecording)
-                                    Text(
-                                      isTopicActive ? 'Active' : 'Inactive',
-                                      style: TextStyle(
-                                        color: isTopicActive
-                                            ? AppColors.accent
-                                            : AppColors.textSecondary,
+                                  if (isRecording) ...[
+                                    if (isTopicActive)
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            Icons.check_circle,
+                                            size: 16,
+                                            color: AppColors.accent,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'Active',
+                                            style: TextStyle(
+                                              color: AppColors.accent,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    else if (isTopicUnavailable)
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            Icons.warning,
+                                            size: 16,
+                                            color: Colors.orange,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Expanded(
+                                            child: Text(
+                                              unavailableReason ?? 'Unavailable',
+                                              style: TextStyle(
+                                                color: Colors.orange,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    else
+                                      Row(
+                                        children: [
+                                          Icon(
+                                            Icons.cancel,
+                                            size: 16,
+                                            color: AppColors.textSecondary,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'Inactive',
+                                            style: TextStyle(
+                                              color: AppColors.textSecondary,
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                    ),
+                                  ],
                                 ],
                               ),
                             ),
                           );
-                        },
-                      ),
-                ),
+                            },
+                          ),
+                    ),
 
-                // Record button
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 56,
-                    child: ElevatedButton.icon(
-                      onPressed: isRecording
-                          ? null
-                          : () => _startRecording(
-                              context, ref, experiment, topicsAsync),
-                      icon: Icon(isRecording ? Icons.stop : Icons.fiber_manual_record),
-                      label: Text(isRecording ? 'Recording...' : 'Start Recording'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor:
-                            isRecording ? AppColors.main : AppColors.accent,
-                        foregroundColor: Colors.white,
+                    // Record button
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 56,
+                        child: ElevatedButton.icon(
+                          onPressed: isRecording
+                              ? null
+                              : () => _startRecording(
+                                  context, ref, experiment, AsyncValue.data(topics)),
+                          icon: Icon(isRecording ? Icons.stop : Icons.fiber_manual_record),
+                          label: Text(isRecording ? 'Recording...' : 'Start Recording'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor:
+                                isRecording ? AppColors.main : AppColors.accent,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (error, stack) => Center(child: Text('Error: $error')),
+              );
+            },
             loading: () => const Center(child: CircularProgressIndicator()),
-            error: (error, stack) => Center(child: Text('Error: $error')),
+            error: (error, stack) => Center(child: Text('Error loading topics: $error')),
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),

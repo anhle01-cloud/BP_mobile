@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import '../../main.dart';
 import '../../providers/publisher_provider.dart';
 import '../../services/publisher_manager.dart';
+import '../../models/network_client.dart';
+import '../../models/topic_history.dart';
 
 class PublishersViewScreen extends ConsumerStatefulWidget {
   const PublishersViewScreen({super.key});
@@ -17,9 +20,10 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
   final Map<String, TextEditingController> _rateControllers = {};
   
   // Cache for WebSocket server info to prevent constant refreshes
-  Future<Map<String, String?>>? _cachedWebSocketInfo;
+  Map<String, String?>? _cachedWebSocketInfoResult;
   DateTime? _lastWebSocketInfoFetch;
-  static const _cacheDuration = Duration(seconds: 5);
+  bool _isFetchingWebSocketInfo = false;
+  static const _cacheDuration = Duration(seconds: 10);
   
   @override
   void dispose() {
@@ -30,25 +34,60 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
     super.dispose();
   }
   
+  /// Get user-friendly error message for sensor PlatformException
+  String _getSensorErrorMessage(String publisherName, PlatformException e) {
+    final publisherDisplayNames = {
+      'gps': 'GPS',
+      'imu': 'IMU',
+      'external': 'External (ESP32)',
+    };
+    
+    final displayName = publisherDisplayNames[publisherName] ?? publisherName;
+    
+    // Check error code for common sensor availability issues
+    if (e.code == 'sensor_not_available' || 
+        e.code == 'NO_SENSOR' || 
+        e.message?.toLowerCase().contains('sensor') == true ||
+        e.message?.toLowerCase().contains('not available') == true ||
+        e.message?.toLowerCase().contains('not found') == true) {
+      return 'This device does not have a $displayName sensor. The sensor is not available on this hardware.';
+    }
+    
+    // Generic PlatformException message
+    if (e.message != null && e.message!.isNotEmpty) {
+      return '${displayName}: ${e.message}';
+    }
+    
+    return 'Failed to enable $displayName. The sensor may not be available on this device.';
+  }
+
   Future<Map<String, String?>> _getWebSocketServerInfo(PublisherManager manager) async {
     final now = DateTime.now();
     
     // Return cached result if still valid
-    if (_cachedWebSocketInfo != null && 
+    if (_cachedWebSocketInfoResult != null && 
         _lastWebSocketInfoFetch != null &&
-        now.difference(_lastWebSocketInfoFetch!) < _cacheDuration) {
-      try {
-        return await _cachedWebSocketInfo!;
-      } catch (e) {
-        // If cached future failed, fetch new one
-        _cachedWebSocketInfo = null;
-      }
+        now.difference(_lastWebSocketInfoFetch!) < _cacheDuration &&
+        !_isFetchingWebSocketInfo) {
+      // Return cached result immediately
+      return Future.value(Map<String, String?>.from(_cachedWebSocketInfoResult!));
+    }
+    
+    // If already fetching, return cached result (even if expired) to prevent multiple concurrent fetches
+    if (_isFetchingWebSocketInfo && _cachedWebSocketInfoResult != null) {
+      return Future.value(Map<String, String?>.from(_cachedWebSocketInfoResult!));
     }
     
     // Fetch new info
-    _cachedWebSocketInfo = manager.getWebSocketServerInfo();
-    _lastWebSocketInfoFetch = now;
-    return _cachedWebSocketInfo!;
+    _isFetchingWebSocketInfo = true;
+    try {
+      final result = await manager.getWebSocketServerInfo();
+      _cachedWebSocketInfoResult = result;
+      _lastWebSocketInfoFetch = now;
+      return result;
+    } finally {
+      _isFetchingWebSocketInfo = false;
+    }
   }
   
   
@@ -78,27 +117,6 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
     PublisherManager manager,
     Map<String, bool> status,
   ) {
-    final publishers = [
-      {
-        'name': 'gps',
-        'displayName': 'GPS',
-        'description': 'Location data from device GPS',
-        'icon': Icons.location_on,
-      },
-      {
-        'name': 'imu',
-        'displayName': 'IMU',
-        'description': 'Accelerometer, gyroscope, and magnetometer data',
-        'icon': Icons.sensors,
-      },
-      {
-        'name': 'external',
-        'displayName': 'External (ESP32)',
-        'description': 'Data from ESP32 clients via WebSocket',
-        'icon': Icons.wifi,
-      },
-    ];
-
     final isExternalEnabled = manager.isPublisherEnabled('external');
     final isExternalActive = status['external'] ?? false;
 
@@ -151,7 +169,7 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
               
               final serverInfo = snapshot.data ?? {};
               final ip = serverInfo['ip'] ?? 'Waiting...';
-              final port = serverInfo['port'] ?? '8080';
+              final port = serverInfo['port'] ?? '3000';
               final url = serverInfo['url'] ?? 'ws://$ip:$port';
 
               return Card(
@@ -265,149 +283,641 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
           ),
         if (isExternalEnabled) const SizedBox(height: 16),
 
-        // Publishers list
-        ...publishers.map((publisher) {
-          final publisherName = publisher['name'] as String;
-          final isActive = status[publisherName] ?? false;
-          final isEnabled = manager.isPublisherEnabled(publisherName);
-          final hasSamplingRate = publisherName == 'gps' || publisherName == 'imu';
+        // INTERNAL PUBLISHERS SECTION
+        _buildSectionHeader('Internal Publishers'),
+        const SizedBox(height: 8),
+        ..._buildInternalPublishers(manager, status),
+        const SizedBox(height: 16),
 
-          return Card(
-            key: ValueKey('publisher_$publisherName'),
-            margin: const EdgeInsets.only(bottom: 12),
-            child: ExpansionTile(
-              leading: CircleAvatar(
-                backgroundColor: isActive 
-                    ? AppColors.accent 
-                    : (isEnabled ? AppColors.textSecondary : AppColors.textTertiary),
-                child: Icon(
-                  publisher['icon'] as IconData,
-                  color: Colors.white,
-                  size: 24,
+        // NETWORK PUBLISHERS SECTION
+        _buildSectionHeader('Network Publishers'),
+        const SizedBox(height: 8),
+        _buildNetworkPublishersSection(manager, isExternalEnabled, isExternalActive),
+      ],
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Text(
+      title,
+      style: TextStyle(
+        fontSize: 16,
+        fontWeight: FontWeight.bold,
+        color: AppColors.textPrimary,
+      ),
+    );
+  }
+
+  List<Widget> _buildInternalPublishers(
+    PublisherManager manager,
+    Map<String, bool> status,
+  ) {
+    final internalPublishers = [
+      {
+        'name': 'gps',
+        'displayName': 'GPS',
+        'description': 'Location data from device GPS',
+        'icon': Icons.location_on,
+      },
+      {
+        'name': 'imu',
+        'displayName': 'IMU',
+        'description': 'Accelerometer, gyroscope, and magnetometer data',
+        'icon': Icons.sensors,
+      },
+    ];
+
+    return internalPublishers.map((publisher) {
+      final publisherName = publisher['name'] as String;
+      final isActive = status[publisherName] ?? false;
+      final isEnabled = manager.isPublisherEnabled(publisherName);
+
+      return Card(
+        key: ValueKey('publisher_$publisherName'),
+        margin: const EdgeInsets.only(bottom: 12),
+        child: ExpansionTile(
+          leading: CircleAvatar(
+            backgroundColor: isActive 
+                ? AppColors.accent 
+                : (isEnabled ? AppColors.textSecondary : AppColors.textTertiary),
+            child: Icon(
+              publisher['icon'] as IconData,
+              color: Colors.white,
+              size: 24,
+            ),
+          ),
+          title: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  publisher['displayName'] as String,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              title: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      publisher['displayName'] as String,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  if (hasSamplingRate && isEnabled) ...[
-                    const SizedBox(width: 4),
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final rate = manager.getSamplingRate(publisherName);
-                        return Text(
-                          '${rate.toStringAsFixed(1)} Hz',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: AppColors.textSecondary,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ],
+              if (isEnabled) ...[
+                const SizedBox(width: 4),
+                Consumer(
+                  builder: (context, ref, child) {
+                    final rate = manager.getSamplingRate(publisherName);
+                    return Text(
+                      '${rate.toStringAsFixed(1)} Hz',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: AppColors.textSecondary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+          subtitle: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: isActive 
+                      ? AppColors.accent 
+                      : AppColors.textSecondary,
+                  shape: BoxShape.circle,
+                ),
               ),
-              subtitle: Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: isActive 
-                          ? AppColors.accent 
-                          : AppColors.textSecondary,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    isActive 
-                        ? 'Active - Emitting data' 
-                        : (isEnabled ? 'Enabled - Starting...' : 'Disabled'),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isActive 
-                          ? AppColors.accent 
-                          : AppColors.textSecondary,
-                    ),
-                  ),
-                ],
+              const SizedBox(width: 4),
+              Text(
+                isActive 
+                    ? 'Active - Emitting data' 
+                    : (isEnabled ? 'Enabled - Starting...' : 'Disabled'),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isActive 
+                      ? AppColors.accent 
+                      : AppColors.textSecondary,
+                ),
               ),
-              trailing: Switch(
-                value: isEnabled,
-                onChanged: (value) async {
-                  try {
-                    if (value) {
-                      await manager.enablePublisher(publisherName);
-                    } else {
-                      await manager.disablePublisher(publisherName);
-                    }
-                  } catch (e) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Error: $e'),
-                          backgroundColor: AppColors.main,
-                        ),
-                      );
-                    }
+            ],
+          ),
+          trailing: Switch(
+            value: isEnabled,
+            onChanged: (value) async {
+              try {
+                if (value) {
+                  await manager.enablePublisher(publisherName);
+                } else {
+                  await manager.disablePublisher(publisherName);
+                }
+              } catch (e) {
+                if (value && mounted) {
+                  setState(() {});
+                }
+                
+                if (mounted) {
+                  String errorMessage;
+                  String errorTitle = 'Error';
+                  
+                  if (e is PlatformException) {
+                    errorTitle = 'Sensor Not Available';
+                    errorMessage = _getSensorErrorMessage(publisherName, e);
+                  } else {
+                    errorMessage = 'Failed to ${value ? 'enable' : 'disable'} ${publisher['displayName']}: $e';
                   }
-                },
-                activeThumbColor: AppColors.accent,
-              ),
-              children: hasSamplingRate ? [
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        publisher['description'] as String,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: AppColors.textSecondary,
-                        ),
+                  
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            errorTitle,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            errorMessage,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Sampling Rate',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.textPrimary,
-                        ),
+                      backgroundColor: AppColors.main,
+                      duration: const Duration(seconds: 4),
+                      action: SnackBarAction(
+                        label: 'OK',
+                        textColor: Colors.white,
+                        onPressed: () {},
                       ),
-                      const SizedBox(height: 8),
-                      _buildSamplingRateInput(
-                        context,
-                        manager,
-                        publisherName,
-                      ),
-                    ],
-                  ),
-                ),
-              ] : [
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
+                    ),
+                  );
+                }
+              }
+            },
+            activeThumbColor: AppColors.accent,
+          ),
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
                     publisher['description'] as String,
                     style: TextStyle(
                       fontSize: 14,
                       color: AppColors.textSecondary,
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Sampling Rate',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildSamplingRateInput(
+                    context,
+                    manager,
+                    publisherName,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }).toList();
+  }
+
+  Widget _buildNetworkPublishersSection(
+    PublisherManager manager,
+    bool isExternalEnabled,
+    bool isExternalActive,
+  ) {
+    // External publisher toggle
+    final externalPublisherCard = Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ExpansionTile(
+        leading: CircleAvatar(
+          backgroundColor: isExternalActive 
+              ? AppColors.accent 
+              : (isExternalEnabled ? AppColors.textSecondary : AppColors.textTertiary),
+          child: const Icon(
+            Icons.wifi,
+            color: Colors.white,
+            size: 24,
+          ),
+        ),
+        title: const Text(
+          'Network (ESP32)',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: isExternalActive 
+                    ? AppColors.accent 
+                    : AppColors.textSecondary,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              isExternalActive 
+                  ? 'Active - Waiting for clients' 
+                  : (isExternalEnabled ? 'Enabled - Starting...' : 'Disabled'),
+              style: TextStyle(
+                fontSize: 12,
+                color: isExternalActive 
+                    ? AppColors.accent 
+                    : AppColors.textSecondary,
+              ),
+            ),
+          ],
+        ),
+        trailing: Switch(
+          value: isExternalEnabled,
+          onChanged: (value) async {
+            try {
+              if (value) {
+                await manager.enablePublisher('external');
+              } else {
+                await manager.disablePublisher('external');
+              }
+            } catch (e) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Failed to ${value ? 'enable' : 'disable'} Network publisher: $e'),
+                    backgroundColor: AppColors.main,
+                  ),
+                );
+              }
+            }
+          },
+          activeThumbColor: AppColors.accent,
+        ),
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Text(
+              'Data from ESP32 clients via WebSocket. Configured on ESP32 side.',
+              style: TextStyle(
+                fontSize: 14,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    // Connected clients list
+    final clientsAsync = ref.watch(connectedClientsProvider);
+    final topicsAsync = ref.watch(networkTopicsProvider);
+    final historyAsync = ref.watch(topicHistoryProvider);
+
+    return Column(
+      children: [
+        externalPublisherCard,
+        if (isExternalEnabled)
+          clientsAsync.when(
+            data: (clients) {
+              if (clients.isEmpty) {
+                return Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        Icon(
+                          Icons.devices_other,
+                          size: 48,
+                          color: AppColors.textTertiary,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'No ESP32 clients connected',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Connect ESP32 devices to see them here',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textTertiary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }
+
+              return Column(
+                children: clients.map((client) {
+                  return _buildClientCard(
+                    client,
+                    topicsAsync,
+                    historyAsync,
+                  );
+                }).toList(),
+              );
+            },
+            loading: () => const Card(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+            ),
+            error: (error, stack) => Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text(
+                  'Error loading clients: $error',
+                  style: TextStyle(color: AppColors.main),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildClientCard(
+    NetworkClient client,
+    AsyncValue<Map<String, Map<String, dynamic>>> topicsAsync,
+    AsyncValue<Map<String, List<TopicHistoryEntry>>> historyAsync,
+  ) {
+    final quality = client.connectionQuality;
+    final qualityText = client.connectionQualityText;
+    Color qualityColor;
+    
+    if (quality == 0.0) {
+      qualityColor = AppColors.textTertiary;
+    } else if (quality < 0.4) {
+      qualityColor = Colors.red;
+    } else if (quality < 0.7) {
+      qualityColor = Colors.orange;
+    } else if (quality < 0.9) {
+      qualityColor = Colors.blue;
+    } else {
+      qualityColor = Colors.green;
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ExpansionTile(
+        leading: CircleAvatar(
+          backgroundColor: client.isConnected ? qualityColor : AppColors.textTertiary,
+          child: const Icon(
+            Icons.devices_other,
+            color: Colors.white,
+            size: 24,
+          ),
+        ),
+        title: Text(
+          client.name,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: client.isConnected ? qualityColor : AppColors.textTertiary,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              client.isConnected ? qualityText : 'Disconnected',
+              style: TextStyle(
+                fontSize: 12,
+                color: client.isConnected ? qualityColor : AppColors.textTertiary,
+              ),
+            ),
+            if (client.latencyMs != null) ...[
+              const SizedBox(width: 8),
+              Text(
+                '${client.latencyMs}ms',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+            ],
+          ],
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Connection info
+                _buildInfoRow('Connected', client.connectedAt.toString().substring(0, 19)),
+                if (client.latencyMs != null)
+                  _buildInfoRow('Latency', '${client.latencyMs}ms'),
+                if (client.missedPings > 0)
+                  _buildInfoRow('Missed Pings', '${client.missedPings}'),
+                const SizedBox(height: 16),
+                
+                // Topics list
+                Text(
+                  'Topics (${client.topics.length})',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                
+                topicsAsync.when(
+                  data: (topicsMap) {
+                    return historyAsync.when(
+                      data: (history) {
+                        return Column(
+                          children: client.topics.map((topic) {
+                            final fullTopicName = '${client.name}/$topic';
+                            final topicInfo = topicsMap[fullTopicName];
+                            final metadata = client.topicMetadata[topic];
+                            final historyEntries = history[fullTopicName] ?? [];
+                            
+                            return _buildTopicCard(
+                              client.name,
+                              topic,
+                              fullTopicName,
+                              metadata,
+                              topicInfo,
+                              historyEntries,
+                            );
+                          }).toList(),
+                        );
+                      },
+                      loading: () => const CircularProgressIndicator(),
+                      error: (e, s) => Text('Error: $e', style: TextStyle(color: AppColors.main)),
+                    );
+                  },
+                  loading: () => const CircularProgressIndicator(),
+                  error: (e, s) => Text('Error: $e', style: TextStyle(color: AppColors.main)),
                 ),
               ],
             ),
-          );
-        }),
-      ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTopicCard(
+    String clientName,
+    String topic,
+    String fullTopicName,
+    TopicMetadata? metadata,
+    Map<String, dynamic>? topicInfo,
+    List<TopicHistoryEntry> historyEntries,
+  ) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: AppColors.textPrimary.withValues(alpha: 0.03),
+      child: ExpansionTile(
+        title: Text(
+          topic,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (metadata != null) ...[
+              Text(
+                metadata.description,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              if (metadata.unit != null || metadata.samplingRate != null)
+                  Text(
+                    [
+                      if (metadata.samplingRate != null) '${metadata.samplingRate!.toStringAsFixed(1)} Hz',
+                      if (metadata.unit != null) metadata.unit!,
+                    ].join(' • '),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textTertiary,
+                  ),
+                ),
+            ],
+            Text(
+              '${historyEntries.length} recent entries',
+              style: TextStyle(
+                fontSize: 11,
+                color: AppColors.textTertiary,
+              ),
+            ),
+          ],
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (historyEntries.isEmpty)
+                  Text(
+                    'No recent entries',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textSecondary,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  )
+                else
+                  ...historyEntries.reversed.map((entry) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Container(
+                        padding: const EdgeInsets.all(8.0),
+                        decoration: BoxDecoration(
+                          color: AppColors.textPrimary.withValues(alpha: 0.05),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              DateFormat('HH:mm:ss.SSS').format(entry.dateTime),
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: AppColors.textTertiary,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              entry.data.toString(),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textPrimary,
+                                fontFamily: 'monospace',
+                              ),
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4.0),
+      child: Row(
+        children: [
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: 12,
+              color: AppColors.textSecondary,
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

@@ -9,6 +9,8 @@ import '../../repositories/experiment_repository.dart';
 import '../experiments/experiment_list_screen.dart';
 import '../publishers/publishers_view_screen.dart';
 import '../settings/settings_screen.dart';
+import '../settings/network_settings_screen.dart';
+import '../settings/client_management_screen.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
@@ -113,6 +115,33 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               ],
             ),
           ),
+          ListTile(
+            leading: const Icon(Icons.settings_ethernet),
+            title: const Text('Network Management'),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const NetworkSettingsScreen(),
+                ),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.devices_other),
+            title: const Text('Client Management'),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const ClientManagementScreen(),
+                ),
+              );
+            },
+          ),
+          const Divider(),
           ListTile(
             leading: const Icon(Icons.settings),
             title: const Text('Settings'),

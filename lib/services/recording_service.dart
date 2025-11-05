@@ -257,7 +257,8 @@ class RecordingService {
         publisher = _publisherManager.gpsPublisher;
       } else if (topic.name.startsWith('imu/')) {
         publisher = _publisherManager.imuPublisher;
-      } else if (topic.name.startsWith('external/')) {
+      } else if (_isNetworkTopic(topic.name)) {
+        // Network topic (format: client_name/topic_tree)
         // Ensure WebSocket server is initialized
         await _publisherManager.getWebSocketServer();
         publisher = _publisherManager.externalPublisher;
@@ -274,7 +275,7 @@ class RecordingService {
         publisherName = 'gps';
       } else if (topic.name.startsWith('imu/')) {
         publisherName = 'imu';
-      } else if (topic.name.startsWith('external/')) {
+      } else if (_isNetworkTopic(topic.name)) {
         publisherName = 'external';
       } else {
         print('Warning: Unknown topic prefix for ${topic.name}');
@@ -288,14 +289,18 @@ class RecordingService {
       }
 
       // Get sampling rate from publisher manager for internal publishers,
-      // or use topic sampling rate for external (though external should be configured in ESP32)
+      // or from topic metadata for network topics
       double samplingRate;
       if (topic.name.startsWith('gps/')) {
         samplingRate = _publisherManager.getSamplingRate('gps');
       } else if (topic.name.startsWith('imu/')) {
         samplingRate = _publisherManager.getSamplingRate('imu');
+      } else if (_isNetworkTopic(topic.name)) {
+        // Network topics - get sampling rate from metadata
+        final metadata = _publisherManager.getTopicMetadata(topic.name);
+        samplingRate = metadata?['sampling_rate'] as double? ?? topic.samplingRate;
       } else {
-        // External topics - use topic rate (though ESP32 should handle this)
+        // Fallback to topic rate
         samplingRate = topic.samplingRate;
       }
 
@@ -368,7 +373,7 @@ class RecordingService {
         publisherName = 'gps';
       } else if (topic.name.startsWith('imu/')) {
         publisherName = 'imu';
-      } else if (topic.name.startsWith('external/')) {
+      } else if (_isNetworkTopic(topic.name)) {
         publisherName = 'external';
       } else {
         continue;
@@ -387,7 +392,7 @@ class RecordingService {
           final topicsForPublisher = _enabledTopics!.where((t) {
             if (publisherName == 'gps') return t.name.startsWith('gps/');
             if (publisherName == 'imu') return t.name.startsWith('imu/');
-            if (publisherName == 'external') return t.name.startsWith('external/');
+            if (publisherName == 'external') return _isNetworkTopic(t.name);
             return false;
           }).toList();
 
@@ -441,14 +446,46 @@ class RecordingService {
       // Continue anyway to avoid blocking
     }
 
+    // For network topics, extract topic_name from data if available
+    // Network topics come with topic_name in format: client_name/topic_tree
+    String actualTopicName = topicName;
+    if (_isNetworkTopic(topicName) && data.containsKey('topic_name')) {
+      actualTopicName = data['topic_name'] as String;
+    }
+
+    // For network topics, check if client is still connected (graceful degradation)
+    if (_isNetworkTopic(actualTopicName)) {
+      final parts = actualTopicName.split('/');
+      if (parts.isNotEmpty) {
+        final clientName = parts[0];
+        final webSocketServer = _publisherManager.webSocketServer;
+        if (webSocketServer != null) {
+          final client = webSocketServer.getClient(clientName);
+          if (client == null || !client.isConnected) {
+            print('Warning: Client $clientName disconnected, topic $actualTopicName unavailable');
+            // Don't record this entry, but don't stop recording - other topics continue
+            return;
+          }
+        } else {
+          // WebSocket server not initialized, skip this entry
+          return;
+        }
+      }
+    }
+
     try {
       // Create data entry with experiment_id and session_id
+      // Extract actual data payload (for network topics, data is nested)
+      final dataPayload = data.containsKey('data') 
+          ? data['data'] as Map<String, dynamic>
+          : data; // For internal topics, data is already the payload
+
       final entry = DataEntry(
         timestamp: data['timestamp'] as int,
-        topicName: topicName,
+        topicName: actualTopicName,
         experimentId: _activeExperiment!.id!,
         sessionId: _currentSession?.id,
-        data: data,
+        data: dataPayload,
       );
 
       // Insert into database (with retry logic for database locks)
@@ -526,6 +563,84 @@ class RecordingService {
     return _publisherManager.getPublisherStatus();
   }
 
+  /// Get unavailable topics (configured but not available)
+  /// Returns map of topic name -> reason (e.g., "Client disconnected", "Publisher disabled")
+  /// Always returns a non-null map, even if recording is not active
+  Map<String, String> getUnavailableTopics() {
+    try {
+      final unavailable = <String, String>{};
+      
+      if (!_isRecording || _enabledTopics == null) {
+        return unavailable;
+      }
+
+    for (var topic in _enabledTopics!) {
+      // Check if topic is active
+      if (_activePublishers.containsKey(topic.name)) {
+        // Topic is active, check if it's a network topic and client is disconnected
+        if (_isNetworkTopic(topic.name)) {
+          final parts = topic.name.split('/');
+          if (parts.isNotEmpty) {
+            final clientName = parts[0];
+            final webSocketServer = _publisherManager.webSocketServer;
+            if (webSocketServer != null) {
+              final client = webSocketServer.getClient(clientName);
+              if (client == null || !client.isConnected) {
+                unavailable[topic.name] = 'Client $clientName disconnected';
+              }
+            } else {
+              unavailable[topic.name] = 'WebSocket server not initialized';
+            }
+          }
+        }
+      } else {
+        // Topic is not active - check why
+        String publisherName;
+        if (topic.name.startsWith('gps/')) {
+          publisherName = 'gps';
+        } else if (topic.name.startsWith('imu/')) {
+          publisherName = 'imu';
+        } else if (_isNetworkTopic(topic.name)) {
+          publisherName = 'external';
+          // Check if client exists
+          final parts = topic.name.split('/');
+          if (parts.isNotEmpty) {
+            final clientName = parts[0];
+            final webSocketServer = _publisherManager.webSocketServer;
+            if (webSocketServer != null) {
+              final client = webSocketServer.getClient(clientName);
+              if (client == null) {
+                unavailable[topic.name] = 'Client $clientName not found';
+              } else if (!client.isConnected) {
+                unavailable[topic.name] = 'Client $clientName disconnected';
+              } else {
+                unavailable[topic.name] = 'Publisher not enabled';
+              }
+            } else {
+              unavailable[topic.name] = 'WebSocket server not initialized';
+            }
+          } else {
+            unavailable[topic.name] = 'Publisher not enabled';
+          }
+        } else {
+          publisherName = 'unknown';
+          unavailable[topic.name] = 'Publisher not enabled';
+        }
+        
+        // Check if publisher is enabled
+        if (publisherName != 'unknown' && !_publisherManager.isPublisherEnabled(publisherName)) {
+          unavailable[topic.name] = 'Publisher $publisherName disabled';
+        }
+      }
+    }
+
+      return unavailable;
+    } catch (e) {
+      print('Error in getUnavailableTopics: $e');
+      return <String, String>{};
+    }
+  }
+
   /// Get current total entries count
   Future<int> getCurrentTotalEntries() async {
     return await _repository.getTotalDataEntriesCount();
@@ -552,5 +667,28 @@ class RecordingService {
     _sessionEntriesController.close();
     _sessionStorageController.close();
     // Note: Publishers are disposed by PublisherManager
+  }
+
+  /// Check if a topic is a network topic (format: client_name/topic_tree)
+  bool _isNetworkTopic(String topicName) {
+    // Network topics are not internal topics (gps/imu) and contain at least one '/'
+    if (topicName.startsWith('gps/') || topicName.startsWith('imu/')) {
+      return false;
+    }
+    // Check if it's a network topic by checking if client exists
+    // Format: client_name/topic_tree
+    if (!topicName.contains('/')) return false;
+    
+    final parts = topicName.split('/');
+    if (parts.length < 2) return false;
+    
+    // Check if first part is a known client name
+    final webSocketServer = _publisherManager.webSocketServer;
+    if (webSocketServer != null) {
+      final client = webSocketServer.getClient(parts[0]);
+      return client != null;
+    }
+    
+    return false;
   }
 }
