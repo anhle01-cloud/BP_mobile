@@ -19,12 +19,6 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
   // Controllers for sampling rate text fields to avoid rebuild issues
   final Map<String, TextEditingController> _rateControllers = {};
   
-  // Cache for WebSocket server info to prevent constant refreshes
-  Map<String, String?>? _cachedWebSocketInfoResult;
-  DateTime? _lastWebSocketInfoFetch;
-  bool _isFetchingWebSocketInfo = false;
-  static const _cacheDuration = Duration(seconds: 10);
-  
   @override
   void dispose() {
     for (var controller in _rateControllers.values) {
@@ -61,36 +55,6 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
     return 'Failed to enable $displayName. The sensor may not be available on this device.';
   }
 
-  Future<Map<String, String?>> _getWebSocketServerInfo(PublisherManager manager) async {
-    final now = DateTime.now();
-    
-    // Return cached result if still valid
-    if (_cachedWebSocketInfoResult != null && 
-        _lastWebSocketInfoFetch != null &&
-        now.difference(_lastWebSocketInfoFetch!) < _cacheDuration &&
-        !_isFetchingWebSocketInfo) {
-      // Return cached result immediately
-      return Future.value(Map<String, String?>.from(_cachedWebSocketInfoResult!));
-    }
-    
-    // If already fetching, return cached result (even if expired) to prevent multiple concurrent fetches
-    if (_isFetchingWebSocketInfo && _cachedWebSocketInfoResult != null) {
-      return Future.value(Map<String, String?>.from(_cachedWebSocketInfoResult!));
-    }
-    
-    // Fetch new info
-    _isFetchingWebSocketInfo = true;
-    try {
-      final result = await manager.getWebSocketServerInfo();
-      _cachedWebSocketInfoResult = result;
-      _lastWebSocketInfoFetch = now;
-      return result;
-    } finally {
-      _isFetchingWebSocketInfo = false;
-    }
-  }
-  
-  
   @override
   Widget build(BuildContext context) {
     final publisherManager = ref.watch(publisherManagerProvider);
@@ -150,138 +114,6 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
           ),
         ),
         const SizedBox(height: 16),
-
-        // WebSocket connection info card (only show when external publisher is enabled)
-        if (isExternalEnabled)
-          FutureBuilder<Map<String, String?>>(
-            key: const ValueKey('websocket_info_card'),
-            future: _getWebSocketServerInfo(manager),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return Card(
-                  color: AppColors.accent.withValues(alpha: 0.1),
-                  child: const Padding(
-                    padding: EdgeInsets.all(16.0),
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                );
-              }
-              
-              final serverInfo = snapshot.data ?? {};
-              final ip = serverInfo['ip'] ?? 'Waiting...';
-              final port = serverInfo['port'] ?? '3000';
-              final url = serverInfo['url'] ?? 'ws://$ip:$port';
-
-              return Card(
-                color: AppColors.accent.withValues(alpha: 0.1),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.wifi,
-                            color: AppColors.accent,
-                            size: 24,
-                          ),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text(
-                              'WebSocket Server',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: isExternalActive
-                                  ? AppColors.accent
-                                  : AppColors.textSecondary,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            isExternalActive ? 'Active' : 'Starting...',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: isExternalActive
-                                  ? AppColors.accent
-                                  : AppColors.textSecondary,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      _buildConnectionInfoRow(
-                        'IP Address',
-                        ip,
-                        Icons.my_location,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildConnectionInfoRow(
-                        'Port',
-                        port,
-                        Icons.numbers,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildConnectionInfoRow(
-                        'WebSocket URL',
-                        url,
-                        Icons.link,
-                      ),
-                      const SizedBox(height: 12),
-                      Container(
-                        padding: const EdgeInsets.all(12.0),
-                        decoration: BoxDecoration(
-                          color: AppColors.textPrimary.withValues(alpha: 0.05),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'ESP32 Connection:',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: AppColors.textSecondary,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            SelectableText(
-                              url,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontFamily: 'monospace',
-                                color: AppColors.accent,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Connect your ESP32 to this device\'s hotspot and use the URL above.',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        if (isExternalEnabled) const SizedBox(height: 16),
 
         // INTERNAL PUBLISHERS SECTION
         _buildSectionHeader('Internal Publishers'),
@@ -918,33 +750,6 @@ class _PublishersViewScreenState extends ConsumerState<PublishersViewScreen> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildConnectionInfoRow(String label, String value, IconData icon) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: AppColors.textSecondary),
-        const SizedBox(width: 8),
-        Text(
-          '$label: ',
-          style: TextStyle(
-            fontSize: 14,
-            color: AppColors.textSecondary,
-          ),
-        ),
-        Expanded(
-          child: SelectableText(
-            value,
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: AppColors.textPrimary,
-              fontFamily: 'monospace',
-            ),
-          ),
-        ),
-      ],
     );
   }
 

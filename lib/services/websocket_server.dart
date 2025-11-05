@@ -244,15 +244,34 @@ class WebSocketServer {
       return null;
     }
 
-    // Check for duplicate name
-    if (_clients.containsKey(clientName) && _clients[clientName]!.isConnected) {
-      channel.sink.add(jsonEncode({
-        'type': 'registration_response',
-        'status': 'rejected',
-        'client_name': clientName,
-        'message': 'Client name already exists. Please choose a different name.',
-      }));
-      return null;
+    // Check for duplicate name - only reject if there's an ACTIVE connection
+    // If old client is disconnected, allow re-registration (for fast reboots)
+    final existingClient = _clients[clientName];
+    if (existingClient != null && existingClient.isConnected) {
+      // Check if the existing client's channel is still valid
+      final existingChannel = _clientChannels[clientName];
+      if (existingChannel != null) {
+        channel.sink.add(jsonEncode({
+          'type': 'registration_response',
+          'status': 'rejected',
+          'client_name': clientName,
+          'message': 'Client name already exists. Please choose a different name.',
+        }));
+        return null;
+      } else {
+        // Channel is gone but client entry exists - clean it up
+        print('Cleaning up stale client entry: $clientName');
+        _clients.remove(clientName);
+        _pendingPings.remove(clientName);
+      }
+    }
+    
+    // If client exists but is disconnected, remove it to allow re-registration
+    if (existingClient != null && !existingClient.isConnected) {
+      print('Removing disconnected client to allow re-registration: $clientName');
+      _clients.remove(clientName);
+      _clientChannels.remove(clientName);
+      _pendingPings.remove(clientName);
     }
 
     // Register client
@@ -405,15 +424,40 @@ class WebSocketServer {
   }
 
   /// Handle client disconnect
+  /// Immediately removes client registration to allow fast reconnection
   void _handleClientDisconnect(String clientName) {
-    final client = _clients[clientName];
-    if (client != null) {
-      _clients[clientName] = client.copyWith(isConnected: false);
-      _clientDisconnectedController.add(clientName);
-      _pendingPings.remove(clientName);
-      print('Client disconnected: $clientName');
-    }
+    print('Client disconnected: $clientName - cleaning up immediately');
+    
+    // Immediately remove from channels and clients to allow fast reconnection
     _clientChannels.remove(clientName);
+    _clients.remove(clientName);
+    _pendingPings.remove(clientName);
+    
+    // Emit disconnect event
+    _clientDisconnectedController.add(clientName);
+    
+    print('Client $clientName cleaned up - ready for re-registration');
+  }
+
+  /// Manually disconnect a client by name
+  /// Closes the WebSocket connection and cleans up
+  Future<void> disconnectClient(String clientName) async {
+    print('Manually disconnecting client: $clientName');
+    
+    // Close the WebSocket channel
+    final channel = _clientChannels[clientName];
+    if (channel != null) {
+      try {
+        await channel.sink.close();
+        print('WebSocket channel closed for $clientName');
+      } catch (e) {
+        print('Error closing channel for $clientName: $e');
+      }
+    }
+    
+    // Clean up (this will also trigger _handleClientDisconnect via onDone)
+    // But we'll also call it directly to ensure cleanup
+    _handleClientDisconnect(clientName);
   }
 
   /// Start ping timer to send periodic pings

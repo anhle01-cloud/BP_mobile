@@ -29,8 +29,19 @@ class TopicPublisher {
     _isActive = true;
 
     // Subscribe to publisher stream and apply sampling rate
+    // For network topics, filter by topic_name to ensure correct routing
     _subscription = publisher.dataStream.listen(
       (data) {
+        // For network topics, only emit data that matches this topic
+        if (topicName.contains('/') && !topicName.startsWith('gps/') && !topicName.startsWith('imu/')) {
+          // Network topic - check if data matches this topic
+          final dataTopicName = data['topic_name'] as String?;
+          if (dataTopicName != null && dataTopicName != topicName) {
+            // Data doesn't match this topic - skip it
+            return;
+          }
+        }
+        // Emit data (either matches topic or is internal topic)
         _emitWithRateLimit(data);
       },
       onError: (error) {
@@ -90,7 +101,17 @@ class TopicPublisher {
   }
 
   /// Add topic metadata to data
+  /// For network topics, preserve the existing topic_name from the enriched data
+  /// For internal topics, add topic_name if not present
   Map<String, dynamic> _addTopicMetadata(Map<String, dynamic> data) {
+    // For network topics (from WebSocket), the topic_name is already set correctly
+    // in the enriched data by the WebSocket server. Don't overwrite it.
+    if (data.containsKey('topic_name') && data['topic_name'].toString().contains('/')) {
+      // Network topic - preserve the existing topic_name
+      return data;
+    }
+    
+    // For internal topics (GPS/IMU), add topic_name if not present
     return {
       ...data,
       'topic_name': topicName,

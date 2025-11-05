@@ -1,0 +1,47 @@
+workflows:
+  ios-workflow:
+    name: iOS Build
+    max_build_duration: 120
+    instance_type: mac_mini_m1
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - app_store_credentials
+      vars:
+        APP_ID: "com.example.blackpearlMobile"
+        BUNDLE_ID: "com.example.blackpearlMobile"
+        XCODE_WORKSPACE: "ios/Runner.xcworkspace"
+        XCODE_SCHEME: "Runner"
+        APP_STORE_ID: "" # Add your App Store Connect App ID if you have one
+    scripts:
+      - name: Get dependencies
+        script: |
+          flutter pub get
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios && pod install
+      - name: Flutter build ipa
+        script: |
+          flutter build ipa --release --no-codesign
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+    publishing:
+      email:
+        recipients:
+          - user@example.com # Update with your email
+        notify:
+          success: true
+          failure: false
+      app_store_connect:
+        auth: app_store_connect_api_key
+        submit_to_testflight: false
+        beta_groups:
+          - group name 1
+          - group name 2
+        # Optional: Submit to App Store
+        # submit_to_app_store: true
+

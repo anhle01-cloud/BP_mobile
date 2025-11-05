@@ -242,6 +242,23 @@ class _ClientManagementScreenState extends ConsumerState<ClientManagementScreen>
                   _buildInfoRow('Missed Pings', '${client.missedPings}'),
                 const SizedBox(height: 16),
                 
+                // Disconnect button
+                if (client.isConnected)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => _disconnectClient(context, client.name, manager),
+                      icon: const Icon(Icons.close, size: 18),
+                      label: const Text('Disconnect Client'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                if (client.isConnected) const SizedBox(height: 16),
+                
                 // Topics section
                 Text(
                   'Available Topics (${client.topics.length})',
@@ -442,6 +459,67 @@ class _ClientManagementScreenState extends ConsumerState<ClientManagementScreen>
         );
       },
     );
+  }
+
+  Future<void> _disconnectClient(
+    BuildContext context,
+    String clientName,
+    PublisherManager manager,
+  ) async {
+    // Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Disconnect Client'),
+        content: Text('Are you sure you want to disconnect "$clientName"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Disconnect'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        final webSocketServer = manager.webSocketServer;
+        if (webSocketServer != null) {
+          await webSocketServer.disconnectClient(clientName);
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Client "$clientName" disconnected'),
+                backgroundColor: AppColors.accent,
+              ),
+            );
+          }
+        } else {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('WebSocket server is not running'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error disconnecting client: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
   }
 
   Widget _buildInfoRow(String label, String value) {
