@@ -54,9 +54,9 @@ const int serverPort = 3000;              // From BP Mobile Network Management
    - **Active**: Connected and healthy
    - **Disconnected**: Connection lost
 4. View connection quality indicators:
-   - **Excellent**: < 50ms latency, 0 missed pings
-   - **Good**: < 100ms latency, < 2 missed pings
-   - **Fair**: < 200ms latency, < 3 missed pings
+   - **Excellent**: &lt; 50ms latency, 0 missed pings
+   - **Good**: &lt; 100ms latency, &lt; 2 missed pings
+   - **Fair**: &lt; 200ms latency, &lt; 3 missed pings
    - **Poor**: Higher latency or more missed pings
 
 ## Troubleshooting
@@ -91,4 +91,3 @@ const int serverPort = 3000;              // From BP Mobile Network Management
 
 - Review the [WebSocket Protocol](/docs/protocol) for message formats
 - See [Code Examples](/docs/examples) for implementation details
-

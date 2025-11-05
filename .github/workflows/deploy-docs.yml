@@ -35,6 +35,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Sync SvelteKit
+        run: bun run svelte-kit sync
+
       - name: Setup Pages
         uses: actions/configure-pages@v3
 
