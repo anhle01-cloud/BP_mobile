@@ -5,7 +5,13 @@ import { mdsvex } from 'mdsvex';
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
 	extensions: ['.svelte', '.md', '.svx'],
-	preprocess: [vitePreprocess(), mdsvex()],
+	preprocess: [
+		vitePreprocess(),
+		mdsvex({
+			remarkPlugins: [],
+			rehypePlugins: []
+		})
+	],
 
 	kit: {
 		adapter: adapter({

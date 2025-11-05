@@ -292,4 +292,3 @@ Install these libraries in Arduino IDE:
 
 - Review [Connection Guide](/docs/connection) for setup
 - Check [WebSocket Protocol](/docs/protocol) for message details
-
