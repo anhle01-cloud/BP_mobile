@@ -1,8 +1,15 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../../main.dart';
+import '../../models/history_session.dart';
 import '../../providers/experiment_provider.dart';
 import '../../providers/recording_provider.dart';
 import '../../repositories/experiment_repository.dart';
@@ -24,22 +31,116 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Future<Map<String, dynamic>>? _dashboardDataFuture;
   Timer? _refreshTimer;
 
+  // --- STATE ---
+  bool _isMarking = false;
+  final TextEditingController _driverController = TextEditingController(
+    text: "Driver",
+  );
+  List<String> _liveLogs = [];
+  List<HistorySession> _historyList = [];
+  int _currentSessionNum = 1;
+
   @override
   void initState() {
     super.initState();
+    _loadHistory();
   }
-  
+
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _driverController.dispose();
     super.dispose();
   }
-  
-  void _refreshDashboardData(WidgetRef ref) {
-    final repository = ref.read(experimentRepositoryProvider);
-    _dashboardDataFuture = _getDashboardData(repository);
+
+  // --- PERSISTENCE LOGIC ---
+  Future<void> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? data = prefs.getString('mark_history_data');
+    if (data != null) {
+      final List<dynamic> decoded = json.decode(data);
+      setState(() {
+        _historyList = decoded
+            .map((item) => HistorySession.fromJson(item))
+            .toList();
+      });
+    }
   }
 
+  Future<void> _persistHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String encoded = json.encode(
+      _historyList.map((s) => s.toJson()).toList(),
+    );
+    await prefs.setString('mark_history_data', encoded);
+  }
+
+  // --- AUTO-INCREMENT LOGIC BY DRIVER NAME ---
+  int _calculateNextNumber(String driverName) {
+    if (_historyList.isEmpty) return 1;
+    final sameDriverSessions = _historyList.where((s) {
+      return s.driverName.trim().toLowerCase() ==
+          driverName.trim().toLowerCase();
+    }).toList();
+
+    if (sameDriverSessions.isEmpty) return 1;
+
+    int maxNum = 0;
+    for (var s in sameDriverSessions) {
+      if (s.sessionNumber > maxNum) maxNum = s.sessionNumber;
+    }
+    return maxNum + 1;
+  }
+
+  void _toggleMarking() {
+    final recordingState = ref.read(recordingStateProvider);
+    final activeExp = recordingState.activeExperiment;
+
+    setState(() {
+      if (_isMarking) {
+        if (_liveLogs.isNotEmpty) {
+          final expId = activeExp?.id;
+          final String generatedRunId =
+              "${_driverController.text} - ${_currentSessionNum.toString().padLeft(2, '0')} - ${expId ?? 'NoExp'}";
+
+          final newSession = HistorySession(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            driverName: _driverController.text,
+            runId: generatedRunId,
+            sessionNumber: _currentSessionNum,
+            experimentId: expId,
+            date: DateTime.now(),
+            logs: List.from(_liveLogs),
+          );
+          _historyList.insert(0, newSession);
+          _persistHistory();
+        }
+        _isMarking = false;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Marker Session Saved')));
+      } else {
+        _currentSessionNum = _calculateNextNumber(_driverController.text);
+        final expInfo = activeExp != null
+            ? "EXP ID: ${activeExp.id}"
+            : "Manual Run";
+        final header =
+            "${_driverController.text.toUpperCase()} | RUN #${_currentSessionNum.toString().padLeft(2, '0')} | $expInfo";
+        _liveLogs = [header];
+        _isMarking = true;
+      }
+    });
+  }
+
+  void _addMarkLog(String eventName) {
+    if (!_isMarking) return;
+    final String timestamp = DateFormat(
+      'yyyy.MM.dd HH:mm:ss',
+    ).format(DateTime.now());
+    setState(() => _liveLogs.insert(1, "$timestamp | $eventName"));
+  }
+
+  // --- UI COMPONENTS ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -56,16 +157,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       ),
       drawer: _buildDrawer(context),
       body: _buildBody(),
-      floatingActionButton: _buildFloatingActionButton(context, ref),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
-        onTap: (index) {
-          setState(() {
-            _selectedIndex = index;
-          });
-        },
+        onTap: (index) => setState(() => _selectedIndex = index),
         selectedItemColor: AppColors.main,
         unselectedItemColor: AppColors.textSecondary,
+        type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.dashboard),
@@ -79,82 +176,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             icon: Icon(Icons.sensors),
             label: 'Publishers',
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDrawer(BuildContext context) {
-    return Drawer(
-      child: ListView(
-        padding: EdgeInsets.zero,
-        children: [
-          DrawerHeader(
-            decoration: const BoxDecoration(
-              color: AppColors.main,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'BP Mobile',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Data Logger',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.8),
-                    fontSize: 16,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.settings_ethernet),
-            title: const Text('Network Management'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const NetworkSettingsScreen(),
-                ),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.devices_other),
-            title: const Text('Client Management'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const ClientManagementScreen(),
-                ),
-              );
-            },
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.settings),
-            title: const Text('Settings'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const SettingsScreen(),
-                ),
-              );
-            },
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.edit_note), label: 'Marker'),
         ],
       ),
     );
@@ -168,103 +190,351 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         return const ExperimentListScreen();
       case 2:
         return const PublishersViewScreen();
+      case 3:
+        return _buildMarkView();
       default:
         return _buildDashboardView();
     }
   }
 
-  Widget? _buildFloatingActionButton(BuildContext context, WidgetRef ref) {
-    // Only watch isRecording status, not the entire state to avoid frequent rebuilds
-    final recordingState = ref.watch(recordingStateProvider);
-    
-    if (!recordingState.isRecording) {
-      return null;
-    }
+  Widget _buildMarkView() {
+    final activeExp = ref.watch(recordingStateProvider).activeExperiment;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(12.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _driverController,
+                  decoration: const InputDecoration(
+                    labelText: 'Driver Name',
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "LINKING EXP:",
+                      style: TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                    Text(
+                      activeExp != null ? "ID: ${activeExp.id}" : "MANUAL MODE",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: activeExp != null ? Colors.blue : Colors.red,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            height: 45,
+            child: ElevatedButton.icon(
+              onPressed: _toggleMarking,
+              icon: Icon(_isMarking ? Icons.stop : Icons.play_arrow),
+              label: Text(_isMarking ? "STOP MARKING" : "START MARKING"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isMarking ? Colors.red : Colors.green,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            height: 160,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey[800]!),
+            ),
+            child: ListView.builder(
+              padding: const EdgeInsets.all(8),
+              itemCount: _liveLogs.length,
+              itemBuilder: (context, index) => Text(
+                _liveLogs[index],
+                style: TextStyle(
+                  color: index == 0 ? Colors.yellowAccent : Colors.greenAccent,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  fontWeight: index == 0 ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          _buildMarkGridSection("DRIVER ACTION", [
+            "PIT IN",
+            "PIT OUT",
+            "OFF-TRACK",
+            "TURN",
+            "CRASH",
+            "OVERTAKE",
+          ], Colors.blueGrey),
+          _buildMarkGridSection("CAR REACTION", [
+            "FAILURE",
+            "ISSUE",
+          ], Colors.blue),
 
-    return FloatingActionButton.extended(
-      onPressed: () => _stopRecording(context, ref, recordingState),
-      backgroundColor: AppColors.main,
-      foregroundColor: Colors.white,
-      icon: const Icon(Icons.stop),
-      label: Text(
-        recordingState.activeExperiment != null
-            ? 'Stop: ${recordingState.activeExperiment!.name}'
-            : 'Stop Recording',
+          const Text(
+            "FLAGS",
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey,
+            ),
+          ),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                "🟡",
+                "🔴",
+                "⚫",
+                "🔵",
+                "🟢",
+                "🏁",
+              ].map((f) => _flagIcon(f)).toList(),
+            ),
+          ),
+          const Divider(height: 30),
+          Center(
+            child: TextButton.icon(
+              onPressed: _showHistorySheet,
+              icon: const Icon(Icons.history),
+              label: const Text("VIEW HISTORY"),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Future<void> _stopRecording(
-    BuildContext context,
-    WidgetRef ref,
-    RecordingState recordingState,
-  ) async {
-    // Stop immediately without confirmation for faster response
-    await ref.read(recordingStateProvider.notifier).stopRecording();
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Recording stopped'),
-          backgroundColor: AppColors.accent,
-          duration: Duration(seconds: 2),
+  Widget _buildMarkGridSection(String title, List<String> items, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: Colors.grey,
+          ),
         ),
-      );
-    }
+        const SizedBox(height: 8),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: items.length,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 8,
+            childAspectRatio: 2.2,
+          ),
+          itemBuilder: (context, index) {
+            return ElevatedButton(
+              onPressed: _isMarking ? () => _addMarkLog(items[index]) : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: color,
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+              child: Text(
+                items[index],
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  Widget _flagIcon(String icon) {
+    return InkWell(
+      onTap: _isMarking ? () => _addMarkLog(icon) : null,
+      child: Container(
+        margin: const EdgeInsets.only(right: 12),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: _isMarking ? Colors.white : Colors.grey[300],
+          shape: BoxShape.circle,
+        ),
+        child: Text(icon, style: const TextStyle(fontSize: 22)),
+      ),
+    );
+  }
+
+  void _showHistorySheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          Map<int?, List<HistorySession>> grouped = {};
+          for (var s in _historyList) {
+            grouped.putIfAbsent(s.experimentId, () => []).add(s);
+          }
+
+          return Container(
+            height: MediaQuery.of(context).size.height * 0.75,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                const Text(
+                  "SESSION HISTORY",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                const Divider(),
+                Expanded(
+                  child: grouped.isEmpty
+                      ? const Center(child: Text("No records found"))
+                      : ListView(
+                          children: grouped.entries.map((entry) {
+                            return ExpansionTile(
+                              initiallyExpanded: true,
+                              title: Text(
+                                entry.key != null
+                                    ? "Experiment ID: ${entry.key}"
+                                    : "Manual Runs (No Exp)",
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.blue,
+                                ),
+                              ),
+                              children: entry.value
+                                  .map(
+                                    (session) => ListTile(
+                                      dense: true,
+                                      title: Text(
+                                        session.runId,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        DateFormat(
+                                          'yyyy.MM.dd HH:mm',
+                                        ).format(session.date),
+                                      ),
+                                      trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.share,
+                                              size: 20,
+                                            ),
+                                            onPressed: () =>
+                                                _exportLogs(session),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                              size: 20,
+                                              color: Colors.redAccent,
+                                            ),
+                                            onPressed: () {
+                                              setState(() {
+                                                _historyList.removeWhere(
+                                                  (s) => s.id == session.id,
+                                                );
+                                              });
+                                              setModalState(() {});
+                                              _persistHistory();
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                            );
+                          }).toList(),
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // --- DASHBOARD DATA & REFRESH ---
+  void _refreshDashboardData(WidgetRef ref) {
+    final repository = ref.read(experimentRepositoryProvider);
+    _dashboardDataFuture = _getDashboardData(repository);
+  }
+
+  Future<Map<String, dynamic>> _getDashboardData(
+    ExperimentRepository repository,
+  ) async {
+    await repository.cleanupOrphanedEntries();
+    final totalStorage = await repository.getStorageSizeEstimate();
+    final totalEntries = await repository.getTotalDataEntriesCount();
+    final experiments = await repository.getAllExperiments();
+    return {
+      'totalStorage': totalStorage,
+      'totalEntries': totalEntries,
+      'totalExperiments': experiments.length,
+    };
   }
 
   Widget _buildDashboardView() {
-    // Watch recording state for real-time updates during recording
     final recordingState = ref.watch(recordingStateProvider);
-    
-    // Use cached future to prevent unnecessary rebuilds
-    if (_dashboardDataFuture == null) {
-      _refreshDashboardData(ref);
-    }
-    
+    if (_dashboardDataFuture == null) _refreshDashboardData(ref);
     return FutureBuilder<Map<String, dynamic>>(
       future: _dashboardDataFuture,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting)
           return const Center(child: CircularProgressIndicator());
-        }
-
-        if (snapshot.hasError) {
-          return Center(child: Text('Error: ${snapshot.error}'));
-        }
-
         final data = snapshot.data ?? {};
-        // Use recording state values if recording, otherwise use cached data
-        final totalStorage = recordingState.isRecording 
-            ? recordingState.storageSizeBytes 
-            : (data['totalStorage'] as int? ?? 0);
-        final totalEntries = recordingState.isRecording
-            ? recordingState.totalEntries
-            : (data['totalEntries'] as int? ?? 0);
-        final totalExperiments = data['totalExperiments'] as int? ?? 0;
-
         return RefreshIndicator(
           onRefresh: () async {
             _refreshDashboardData(ref);
             setState(() {});
           },
           child: SingleChildScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.all(16.0),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // System Time Card
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(16.0),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
+                        const Row(
                           children: [
-                            const Icon(Icons.access_time, color: AppColors.accent),
-                            const SizedBox(width: 8),
-                            const Text(
+                            Icon(Icons.access_time, color: AppColors.accent),
+                            SizedBox(width: 8),
+                            Text(
                               'System Time',
                               style: TextStyle(
                                 fontSize: 18,
@@ -289,10 +559,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                   style: const TextStyle(
                                     fontSize: 24,
                                     fontWeight: FontWeight.bold,
-                                    color: AppColors.textPrimary,
                                   ),
                                 ),
-                                const SizedBox(height: 4),
                                 Text(
                                   DateFormat('HH:mm:ss').format(now),
                                   style: const TextStyle(
@@ -310,65 +578,33 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
-
-                // Quick Stats Card
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        Row(
-                          children: [
-                            const Text(
-                              'Quick Stats',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            if (recordingState.isRecording) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                width: 8,
-                                height: 8,
-                                decoration: const BoxDecoration(
-                                  color: AppColors.main,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              const Text(
-                                'LIVE',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: AppColors.main,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ],
+                        _buildQuickStat(
+                          'Experiments',
+                          (data['totalExperiments'] ?? 0).toString(),
+                          Icons.science,
                         ),
-                        const SizedBox(height: 16),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            _buildQuickStat(
-                              'Experiments',
-                              totalExperiments.toString(),
-                              Icons.science,
-                            ),
-                            _buildQuickStat(
-                              'Entries',
-                              totalEntries.toString(),
-                              Icons.data_object,
-                            ),
-                            _buildQuickStat(
-                              'Storage',
-                              _formatBytesShort(totalStorage),
-                              Icons.storage,
-                            ),
-                          ],
+                        _buildQuickStat(
+                          'Entries',
+                          (recordingState.isRecording
+                                  ? recordingState.totalEntries
+                                  : (data['totalEntries'] ?? 0))
+                              .toString(),
+                          Icons.data_object,
+                        ),
+                        _buildQuickStat(
+                          'Storage',
+                          _formatBytesShort(
+                            recordingState.isRecording
+                                ? recordingState.storageSizeBytes
+                                : (data['totalStorage'] ?? 0),
+                          ),
+                          Icons.storage,
                         ),
                       ],
                     ),
@@ -389,20 +625,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         const SizedBox(height: 8),
         Text(
           value,
-          style: const TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: AppColors.textPrimary,
-          ),
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
         ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 12,
-            color: AppColors.textSecondary,
-          ),
-        ),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ],
     );
   }
@@ -410,28 +635,54 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   String _formatBytesShort(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)}K';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}M';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)}G';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)}M';
   }
 
-  Future<Map<String, dynamic>> _getDashboardData(
-    ExperimentRepository repository,
-  ) async {
-    // Clean up orphaned entries first
-    await repository.cleanupOrphanedEntries();
-    
-    final totalStorage = await repository.getStorageSizeEstimate();
-    final totalEntries = await repository.getTotalDataEntriesCount();
-    final experiments = await repository.getAllExperiments();
+  Future<void> _exportLogs(HistorySession session) async {
+    final String content =
+        "Driver: ${session.driverName}\nRun: ${session.runId}\nDate: ${session.date}\n\nLogs:\n${session.logs.join('\n')}";
+    final directory = await getTemporaryDirectory();
+    final file = File(
+      '${directory.path}/${session.runId.replaceAll(" ", "_")}.txt',
+    );
+    await file.writeAsString(content);
+    await Share.shareXFiles([
+      XFile(file.path),
+    ], text: 'Log Export: ${session.runId}');
+  }
 
-    return {
-      'systemTime': DateTime.now(),
-      'totalStorage': totalStorage,
-      'totalEntries': totalEntries,
-      'totalExperiments': experiments.length,
-    };
+  Widget _buildDrawer(BuildContext context) {
+    return Drawer(
+      child: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          const DrawerHeader(
+            decoration: BoxDecoration(color: AppColors.main),
+            child: Text(
+              'BP Mobile',
+              style: TextStyle(color: Colors.white, fontSize: 24),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings_ethernet),
+            title: const Text('Network Settings'),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => const NetworkSettingsScreen(),
+              ),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings),
+            title: const Text('General Settings'),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => const SettingsScreen()),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
-
